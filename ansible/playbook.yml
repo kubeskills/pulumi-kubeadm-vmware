@@ -1,0 +1,241 @@
+---
+- name: Prepare Kubernetes nodes
+  hosts: kube_nodes
+  become: true
+  become_method: sudo
+  vars:
+    kubernetes_apt_release: "https://pkgs.k8s.io/core:/stable:/v1.34"
+    kubernetes_package_version: "1.34.1-1.1"
+    kubernetes_packages:
+      - kubelet
+      - kubeadm
+      - kubectl
+  tasks:
+    - name: Ensure APT dependencies are installed
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: true
+
+    - name: Ensure apt keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Kubernetes apt repository key
+      ansible.builtin.get_url:
+        url: "{{ kubernetes_apt_release }}/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: '0644'
+
+    - name: Convert repository key to GPG format
+      ansible.builtin.command:
+        cmd: >
+          gpg --dearmor --yes
+          --output /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          /etc/apt/keyrings/kubernetes-apt-keyring.asc
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      register: convert_gpg
+      changed_when: convert_gpg.rc == 0
+
+    - name: Configure Kubernetes apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        mode: '0644'
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] {{ kubernetes_apt_release }}/deb/ /
+
+    - name: Update apt cache after adding Kubernetes repository
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install containerd runtime
+      ansible.builtin.apt:
+        name: containerd
+        state: present
+        update_cache: true
+
+    - name: Ensure containerd config directory exists
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+
+    - name: Check containerd configuration state
+      ansible.builtin.shell: |
+        test -f /etc/containerd/config.toml &&
+        grep -q 'SystemdCgroup = true' /etc/containerd/config.toml &&
+        grep -q 'sandbox_image = "registry.k8s.io/pause:3.10"' /etc/containerd/config.toml
+      register: containerd_config_check
+      changed_when: false
+      failed_when: false
+
+    - name: Generate containerd configuration
+      ansible.builtin.shell: |
+        set -o pipefail
+        containerd config default \
+        | sed 's/SystemdCgroup = false/SystemdCgroup = true/' \
+        | sed 's|sandbox_image = ".*"|sandbox_image = "registry.k8s.io/pause:3.10"|' \
+        > /etc/containerd/config.toml
+      args:
+        executable: /bin/bash
+      when: containerd_config_check.rc != 0
+      notify: Restart containerd
+
+    - name: Ensure containerd service is enabled
+      ansible.builtin.systemd:
+        name: containerd
+        enabled: true
+        state: started
+
+    - name: Ensure IPv4 forwarding is enabled
+      ansible.builtin.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: true
+
+    - name: Check if br_netfilter module is loaded
+      ansible.builtin.shell: lsmod | grep -q '^br_netfilter'
+      register: br_netfilter_check
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure br_netfilter module is loaded
+      ansible.builtin.command: modprobe br_netfilter
+      when: br_netfilter_check.rc != 0
+
+    - name: Persist kernel bridge module load configuration
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        mode: '0644'
+        content: |
+          br_netfilter
+
+    - name: Configure bridge networking sysctl values
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/k8s.conf
+        mode: '0644'
+        content: |
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.bridge.bridge-nf-call-iptables = 1
+
+    - name: Reload sysctl settings
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+
+    - name: Check which Kubernetes packages are already installed
+      ansible.builtin.shell: dpkg -s "{{ item }}" > /dev/null 2>&1
+      loop: "{{ kubernetes_packages }}"
+      register: kube_pkg_check
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure Kubernetes packages are unheld before version pin
+      ansible.builtin.dpkg_selections:
+        name: "{{ item.item }}"
+        selection: install
+      loop: "{{ kube_pkg_check.results }}"
+      when: item.rc == 0
+
+    - name: Install Kubernetes components
+      ansible.builtin.apt:
+        name: >-
+          {{
+            kubernetes_packages
+            | map('regex_replace', '$', '=' + kubernetes_package_version)
+            | list
+          }}
+        state: present
+        update_cache: true
+        allow_change_held_packages: true
+
+    - name: Verify Kubernetes binaries are present
+      ansible.builtin.command: "which {{ item }}"
+      loop:
+        - kubectl
+        - kubeadm
+        - kubelet
+      register: kubernetes_binaries_check
+      changed_when: false
+
+    - name: Hold Kubernetes packages at current version
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop: "{{ kubernetes_packages }}"
+
+    - name: Enable kubelet service
+      ansible.builtin.systemd:
+        name: kubelet
+        enabled: true
+        state: started
+
+    - name: Optionally set hostname when provided
+      ansible.builtin.hostname:
+        name: "{{ node_hostname }}"
+      when: node_hostname is defined
+
+    - name: Ensure swap is disabled
+      ansible.builtin.command: swapoff -a
+      when: ansible_swaptotal_mb | default(0) | int > 0
+      changed_when: false
+
+    - name: Enable SSH password authentication
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*PasswordAuthentication\s+'
+        line: 'PasswordAuthentication yes'
+        state: present
+      notify: Restart sshd
+
+    - name: Permit root login with password
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*PermitRootLogin\s+'
+        line: 'PermitRootLogin yes'
+        state: present
+      notify: Restart sshd
+
+    - name: Create admin user
+      ansible.builtin.user:
+        name: admin
+        shell: /bin/bash
+        groups: sudo
+        append: true
+        create_home: true
+        state: present
+
+    - name: Set admin user password
+      ansible.builtin.command: chpasswd
+      args:
+        stdin: "admin:{{ admin_password }}"
+      changed_when: true
+      no_log: true
+
+    - name: Flush handlers to apply sshd config now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Display node credentials
+      ansible.builtin.debug:
+        msg: >-
+          Public IP: {{ ansible_host }}
+          | root password: {{ root_password }}
+          | admin password: {{ admin_password }}
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+
+    - name: Restart sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted

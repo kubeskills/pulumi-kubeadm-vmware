@@ -1,0 +1,22 @@
+{
+  "name": "pulumi-kubeadm-vmware",
+  "version": "0.1.0",
+  "description": "Pulumi program that provisions two VMware vSphere virtual machines and prepares them for kubeadm.",
+  "main": "index.ts",
+  "license": "Apache-2.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "lint": "npm run build",
+    "typecheck": "npm run build"
+  },
+  "dependencies": {
+    "@pulumi/vsphere": "^4.17.0",
+    "@pulumi/pulumi": "^3.142.0",
+    "@pulumi/random": "^4.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "typescript": "^5.4.5"
+  }
+}

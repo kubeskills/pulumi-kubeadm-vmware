@@ -1,0 +1,3 @@
+name: pulumi-kubeadm-vmware
+runtime: nodejs
+description: Provision two VMware vSphere virtual machines and prepare them for kubeadm.
