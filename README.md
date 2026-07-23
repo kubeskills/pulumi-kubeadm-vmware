@@ -2,6 +2,8 @@
 
 This Pulumi program provisions two VMware vSphere virtual machines (or a configurable count) by cloning them from an existing vSphere template. After the infrastructure is created, run the included Ansible playbook to install and hold `kubectl`, `kubeadm`, and `kubelet`, leaving each node ready for a kubeadm-managed Kubernetes cluster.
 
+See also: [pulumi-kubeadm-linode](https://github.com/kubeskills/pulumi-kubeadm-linode) for the equivalent setup on Linode.
+
 ## Prerequisites
 - Access to a vCenter Server (cloning requires vCenter; it is not supported on direct ESXi host connections).
 - Pulumi CLI configured with vSphere credentials (`vsphere:vsphereServer`, `vsphere:user`, `vsphere:password` config, or the `VSPHERE_SERVER` / `VSPHERE_USER` / `VSPHERE_PASSWORD` environment variables).
