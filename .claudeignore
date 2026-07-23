@@ -1,0 +1,7 @@
+node_modules/
+bin/
+package-lock.json
+
+# Local Pulumi stack config can contain per-environment settings/secrets
+Pulumi.*.yaml
+!Pulumi.yaml
